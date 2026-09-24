@@ -17,7 +17,9 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git build-essential bc flex bison libncurses-dev cpio python3
+          sudo apt-get install -y git build-essential bc flex bison libncurses-dev cpio python3 wget libmpc3 libgmp10
+          wget -q https://archive.ubuntu.com/ubuntu/pool/main/m/mpfr4/libmpfr4_3.1.4-1_amd64.deb -O /tmp/libmpfr4.deb
+          sudo dpkg -i /tmp/libmpfr4.deb
 
       - name: Clone NetHunter flo cm-13.0 kernel
         run: |
@@ -58,6 +60,7 @@ jobs:
         run: |
           git clone --depth 1 --branch mm-6.0 https://github.com/Evervolv/android_prebuilts_gcc_linux-x86_arm_arm-eabi-4.9.git toolchain
           ./toolchain/bin/arm-eabi-gcc --version
+          ldd ./toolchain/libexec/gcc/arm-eabi/4.9.4/cc1 || true
 
       - name: Build flo kernel
         working-directory: kernel
