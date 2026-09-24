@@ -1,0 +1,75 @@
+name: Build NetHunter flo BT400
+
+on:
+  push:
+    branches:
+      - nethunter-bt400
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout helper repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git build-essential bc flex bison libncurses-dev wget xz-utils cpio python3
+
+      - name: Clone NetHunter flo cm-13.0 kernel
+        run: |
+          git clone --depth 1 --branch cm-13.0 https://github.com/jcadduono/nethunter_kernel_flo.git kernel
+
+      - name: Patch btusb for ASUS USB-BT400 0b05:17cb
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('kernel/drivers/bluetooth/btusb.c')
+          s = p.read_text()
+          if 'USB_DEVICE(0x0b05, 0x17cb)' in s:
+              print('USB-BT400 ID already present')
+          else:
+              needle = '\t{ USB_DEVICE(0x0a5c, 0x21e1) },\n'
+              repl = needle + '\n\t/* ASUS USB-BT400 - Broadcom BCM20702A0 */\n\t{ USB_DEVICE(0x0b05, 0x17cb) },\n'
+              if needle not in s:
+                  raise SystemExit('Patch anchor not found')
+              p.write_text(s.replace(needle, repl, 1))
+          PY
+          grep -n -A5 -B2 '0x17cb' kernel/drivers/bluetooth/btusb.c
+
+      - name: Download Linaro GCC 4.9 toolchain
+        run: |
+          mkdir -p "$HOME/build/toolchain"
+          cd "$HOME/build/toolchain"
+          wget -q --show-progress https://releases.linaro.org/components/toolchain/binaries/4.9-2016.02/arm-linux-gnueabihf/gcc-linaro-4.9-2016.02-x86_64_arm-linux-gnueabihf.tar.xz
+          tar -xJf gcc-linaro-4.9-2016.02-x86_64_arm-linux-gnueabihf.tar.xz
+          "$HOME/build/toolchain/gcc-linaro-4.9-2016.02-x86_64_arm-linux-gnueabihf/bin/arm-linux-gnueabihf-gcc" --version
+
+      - name: Build flo kernel
+        working-directory: kernel
+        run: |
+          export ARCH=arm
+          export CROSS_COMPILE="$HOME/build/toolchain/gcc-linaro-4.9-2016.02-x86_64_arm-linux-gnueabihf/bin/arm-linux-gnueabihf-"
+          mkdir -p build
+          make O=build nethunter_flo_defconfig
+          make O=build -j2 zImage
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifact
+          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400
+          cp kernel/build/.config artifact/nethunter-flo-bt400.config
+          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400
+          sha256sum artifact/* | tee artifact/SHA256SUMS.txt
+          ls -lh artifact
+
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nethunter-flo-bt400-kernel
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
