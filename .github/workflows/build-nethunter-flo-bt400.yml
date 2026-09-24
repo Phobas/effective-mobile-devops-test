@@ -40,6 +40,20 @@ jobs:
           PY
           grep -n -A5 -B2 '0x17cb' kernel/drivers/bluetooth/btusb.c
 
+      - name: Make legacy gcc-wrapper work with Python 3
+        run: |
+          python3 -m lib2to3 -w kernel/scripts/gcc-wrapper.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('kernel/scripts/gcc-wrapper.py')
+          s = p.read_text()
+          s = s.replace('#! /usr/bin/env python', '#!/usr/bin/env python3', 1)
+          s = s.replace('subprocess.Popen(args, stderr=subprocess.PIPE)',
+                        'subprocess.Popen(args, stderr=subprocess.PIPE, universal_newlines=True)')
+          p.write_text(s)
+          PY
+          python3 -m py_compile kernel/scripts/gcc-wrapper.py
+
       - name: Clone Android GCC 4.9 toolchain
         run: |
           git clone --depth 1 --branch mm-6.0 https://github.com/Evervolv/android_prebuilts_gcc_linux-x86_arm_arm-eabi-4.9.git toolchain
