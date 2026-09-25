@@ -57,10 +57,8 @@ jobs:
 
           # Critical ABI fix: this flo tree has struct hci_dev::driver_data,
           # but hci_get/set_drvdata() use hdev->dev drvdata. hci_register_sysfs()
-          # later overwrites that dev drvdata with hdev itself. btusb_open() then
-          # interprets hdev as struct btusb_data and dereferences a NULL intf,
-          # causing the observed usb_autopm_get_interface(NULL) kernel panic.
-          # Keep btusb private state in the legacy hdev->driver_data field.
+          # later overwrites that dev drvdata with hdev itself. Keep btusb
+          # private state in the legacy hdev->driver_data field instead.
           s = s.replace('hci_get_drvdata(hdev)', 'hdev->driver_data')
           s = s.replace('hci_set_drvdata(hdev, data);', 'hdev->driver_data = data;')
 
@@ -73,6 +71,28 @@ jobs:
             echo 'ERROR: unpatched hci_get_drvdata remains in btusb.c'
             exit 1
           fi
+
+      - name: Add modern BlueZ management-channel compatibility
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('kernel/net/bluetooth/hci_sock.c')
+          s = p.read_text()
+
+          # This Android/Qualcomm 3.4 tree uses the old ABI:
+          #   RAW=0, CONTROL=1
+          # Modern BlueZ (including 5.66 in the NetHunter chroot) uses:
+          #   RAW=0, USER=1, MONITOR=2, CONTROL=3
+          # Translate modern CONTROL channel 3 to this kernel's legacy
+          # internal CONTROL channel 1, preserving compatibility with both.
+          old = '''\tif (haddr.hci_channel > HCI_CHANNEL_CONTROL)\n\t\treturn -EINVAL;\n\n\tif (haddr.hci_channel == HCI_CHANNEL_CONTROL && !enable_mgmt)\n\t\treturn -EINVAL;\n'''
+          new = '''\t/* Accept modern BlueZ HCI_CHANNEL_CONTROL (3) and map it to\n\t * this legacy Android kernel's HCI_CHANNEL_CONTROL (1). */\n\tif (haddr.hci_channel == 3)\n\t\thaddr.hci_channel = HCI_CHANNEL_CONTROL;\n\telse if (haddr.hci_channel > HCI_CHANNEL_CONTROL)\n\t\treturn -EINVAL;\n\n\tif (haddr.hci_channel == HCI_CHANNEL_CONTROL && !enable_mgmt)\n\t\treturn -EINVAL;\n'''
+          if old not in s:
+              raise SystemExit('HCI management-channel patch anchor not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+          grep -n -A14 -B5 'modern BlueZ HCI_CHANNEL_CONTROL' kernel/net/bluetooth/hci_sock.c
 
       - name: Make legacy gcc-wrapper work with Python 3
         run: |
@@ -106,17 +126,17 @@ jobs:
       - name: Prepare artifacts
         run: |
           mkdir -p artifact
-          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-drvdatafix
-          cp kernel/build/.config artifact/nethunter-flo-bt400-drvdatafix.config
-          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-drvdatafix
-          cp kernel/build/vmlinux artifact/vmlinux-nethunter-flo-bt400-drvdatafix
+          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-mgmtcompat
+          cp kernel/build/.config artifact/nethunter-flo-bt400-mgmtcompat.config
+          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-mgmtcompat
+          cp kernel/build/vmlinux artifact/vmlinux-nethunter-flo-bt400-mgmtcompat
           sha256sum artifact/* | tee artifact/SHA256SUMS.txt
           ls -lh artifact
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nethunter-flo-bt400-drvdatafix-kernel
+          name: nethunter-flo-bt400-mgmtcompat-kernel
           path: artifact/
           if-no-files-found: error
           retention-days: 30
