@@ -35,12 +35,12 @@ jobs:
               print('USB-BT400 ID already present')
           else:
               needle = '\t{ USB_DEVICE(0x0a5c, 0x21e1) },\n'
-              repl = needle + '\n\t/* ASUS USB-BT400 - Broadcom BCM20702A0 */\n\t{ USB_DEVICE(0x0b05, 0x17cb) },\n'
+              repl = needle + '\n\t/* ASUS USB-BT400 - Broadcom BCM20702A0.\n\t * Old flo Android USB core returns -EINVAL while btusb claims\n\t * the secondary SCO/isoc interface, so keep HCI command/ACL\n\t * transport and skip the optional isochronous interface. */\n\t{ USB_DEVICE(0x0b05, 0x17cb), .driver_info = BTUSB_BROKEN_ISOC },\n'
               if needle not in s:
                   raise SystemExit('Patch anchor not found')
               p.write_text(s.replace(needle, repl, 1))
           PY
-          grep -n -A5 -B2 '0x17cb' kernel/drivers/bluetooth/btusb.c
+          grep -n -A8 -B2 '0x17cb' kernel/drivers/bluetooth/btusb.c
 
       - name: Make legacy gcc-wrapper work with Python 3
         run: |
@@ -74,16 +74,16 @@ jobs:
       - name: Prepare artifacts
         run: |
           mkdir -p artifact
-          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400
-          cp kernel/build/.config artifact/nethunter-flo-bt400.config
-          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400
+          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-noisoc
+          cp kernel/build/.config artifact/nethunter-flo-bt400-noisoc.config
+          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-noisoc
           sha256sum artifact/* | tee artifact/SHA256SUMS.txt
           ls -lh artifact
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nethunter-flo-bt400-kernel
+          name: nethunter-flo-bt400-noisoc-kernel
           path: artifact/
           if-no-files-found: error
           retention-days: 30
