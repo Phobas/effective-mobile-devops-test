@@ -25,7 +25,7 @@ jobs:
         run: |
           git clone --depth 1 --branch cm-13.0 https://github.com/jcadduono/nethunter_kernel_flo.git kernel
 
-      - name: Patch btusb for ASUS USB-BT400 0b05:17cb and flo HCI ABI
+      - name: Patch btusb for ASUS USB-BT400 and old flo HCI driver-data ABI
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -39,12 +39,8 @@ jobs:
                   raise SystemExit('BT400 ID patch anchor not found')
               s = s.replace(needle, repl, 1)
 
-          # This flo tree has an older Qualcomm HCI core that requires
-          # hdev->destruct, while its btusb.c is from the newer API and
-          # never assigns one. hci_register_dev() therefore returns -EINVAL.
-          # Current btusb_disconnect() already calls hci_free_dev(), so use
-          # a no-op compatibility destructor to satisfy the old HCI core
-          # without introducing a double-free.
+          # Old Qualcomm HCI core requires ->destruct. Keep it no-op because
+          # btusb_disconnect() already owns/free()s the btusb private data.
           if 'static void btusb_compat_destruct(struct hci_dev *hdev)' not in s:
               needle = 'static struct usb_driver btusb_driver;\n'
               repl = needle + '\n/* Compatibility shim for the older flo HCI core. */\nstatic void btusb_compat_destruct(struct hci_dev *hdev)\n{\n}\n'
@@ -59,10 +55,24 @@ jobs:
                   raise SystemExit('HCI callback patch anchor not found')
               s = s.replace(needle, repl, 1)
 
+          # Critical ABI fix: this flo tree has struct hci_dev::driver_data,
+          # but hci_get/set_drvdata() use hdev->dev drvdata. hci_register_sysfs()
+          # later overwrites that dev drvdata with hdev itself. btusb_open() then
+          # interprets hdev as struct btusb_data and dereferences a NULL intf,
+          # causing the observed usb_autopm_get_interface(NULL) kernel panic.
+          # Keep btusb private state in the legacy hdev->driver_data field.
+          s = s.replace('hci_get_drvdata(hdev)', 'hdev->driver_data')
+          s = s.replace('hci_set_drvdata(hdev, data);', 'hdev->driver_data = data;')
+
           p.write_text(s)
           PY
           grep -n -A5 -B2 '0x17cb' kernel/drivers/bluetooth/btusb.c
           grep -n -A8 -B4 'btusb_compat_destruct' kernel/drivers/bluetooth/btusb.c
+          grep -n 'driver_data' kernel/drivers/bluetooth/btusb.c | head -n 30
+          if grep -q 'hci_get_drvdata(hdev)' kernel/drivers/bluetooth/btusb.c; then
+            echo 'ERROR: unpatched hci_get_drvdata remains in btusb.c'
+            exit 1
+          fi
 
       - name: Make legacy gcc-wrapper work with Python 3
         run: |
@@ -96,16 +106,17 @@ jobs:
       - name: Prepare artifacts
         run: |
           mkdir -p artifact
-          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-hcifix
-          cp kernel/build/.config artifact/nethunter-flo-bt400-hcifix.config
-          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-hcifix
+          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-drvdatafix
+          cp kernel/build/.config artifact/nethunter-flo-bt400-drvdatafix.config
+          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-drvdatafix
+          cp kernel/build/vmlinux artifact/vmlinux-nethunter-flo-bt400-drvdatafix
           sha256sum artifact/* | tee artifact/SHA256SUMS.txt
           ls -lh artifact
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nethunter-flo-bt400-hcifix-kernel
+          name: nethunter-flo-bt400-drvdatafix-kernel
           path: artifact/
           if-no-files-found: error
           retention-days: 30
