@@ -104,7 +104,7 @@ jobs:
           p = Path('kernel/net/bluetooth/mgmt.c')
           s = p.read_text()
           old = '''\tev = (void *) skb_put(skb, sizeof(*ev) + rp_len);\n\tput_unaligned_le16(cmd, &ev->opcode);\n\n\tif (rp)\n\t\tmemcpy(ev->data, rp, rp_len);'''
-          new = '''\tev = (void *) skb_put(skb, sizeof(*ev) + rp_len);\n\tput_unaligned_le16(cmd, &ev->opcode);\n\tev->status = MGMT_STATUS_SUCCESS;\n\n\tif (rp)\n\t\tmemcpy(ev->data, rp, rp_len);'''
+          new = '''\tev = (void *) skb_put(skb, sizeof(*ev) + rp_len);\n\tput_unaligned_le16(cmd, &ev->opcode);\n\tev->status = 0; /* MGMT status success */\n\n\tif (rp)\n\t\tmemcpy(ev->data, rp, rp_len);'''
           if old not in s:
               raise SystemExit('MGMT cmd-complete writer patch anchor not found')
           s = s.replace(old, new, 1)
