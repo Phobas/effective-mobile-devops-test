@@ -85,7 +85,7 @@ func = '''static int read_controller_info(struct sock *sk, u16 index)
 		__u8 short_name[11];
 	} __packed rp;
 	struct hci_dev *hdev;
-	u32 supported, current;
+	u32 supported, current_settings;
 
 	BT_DBG("sock %p hci%u", sk, index);
 	hdev = hci_dev_get(index);
@@ -104,16 +104,16 @@ func = '''static int read_controller_info(struct sock *sk, u16 index)
 	/* Basic MGMT v1 settings only. */
 	supported = 0x00000001 | 0x00000002 | 0x00000008 |
 		    0x00000010 | 0x00000080;
-	current = 0x00000010 | 0x00000080;
+	current_settings = 0x00000010 | 0x00000080;
 	if (test_bit(HCI_UP, &hdev->flags))
-		current |= 0x00000001;
+		current_settings |= 0x00000001;
 	if (test_bit(HCI_PSCAN, &hdev->flags))
-		current |= 0x00000002;
+		current_settings |= 0x00000002;
 	if (test_bit(HCI_ISCAN, &hdev->flags))
-		current |= 0x00000008;
+		current_settings |= 0x00000008;
 
 	put_unaligned_le32(supported, &rp.supported_settings);
-	put_unaligned_le32(current, &rp.current_settings);
+	put_unaligned_le32(current_settings, &rp.current_settings);
 	memcpy(rp.dev_class, hdev->dev_class, sizeof(rp.dev_class));
 	memcpy(rp.name, hdev->dev_name, sizeof(hdev->dev_name));
 
