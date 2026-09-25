@@ -25,12 +25,10 @@ jobs:
         run: |
           git clone --depth 1 --branch cm-13.0 https://github.com/jcadduono/nethunter_kernel_flo.git kernel
 
-      - name: Patch BT400 and BlueZ compatibility
+      - name: Patch btusb for ASUS USB-BT400 and old flo HCI driver-data ABI
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
-          # ---- btusb: ASUS USB-BT400 + old flo HCI ABI ----
           p = Path('kernel/drivers/bluetooth/btusb.c')
           s = p.read_text()
 
@@ -38,44 +36,61 @@ jobs:
               needle = '\t{ USB_DEVICE(0x0a5c, 0x21e1) },\n'
               repl = needle + '\n\t/* ASUS USB-BT400 - Broadcom BCM20702A0. */\n\t{ USB_DEVICE(0x0b05, 0x17cb), .driver_info = BTUSB_BROKEN_ISOC },\n'
               if needle not in s:
-                  raise SystemExit('BT400 ID anchor not found')
+                  raise SystemExit('BT400 ID patch anchor not found')
               s = s.replace(needle, repl, 1)
 
           if 'static void btusb_compat_destruct(struct hci_dev *hdev)' not in s:
               needle = 'static struct usb_driver btusb_driver;\n'
               repl = needle + '\n/* Compatibility shim for the older flo HCI core. */\nstatic void btusb_compat_destruct(struct hci_dev *hdev)\n{\n}\n'
               if needle not in s:
-                  raise SystemExit('btusb_driver anchor not found')
+                  raise SystemExit('btusb_driver declaration anchor not found')
               s = s.replace(needle, repl, 1)
 
           if 'hdev->destruct = btusb_compat_destruct;' not in s:
               needle = '\thdev->notify   = btusb_notify;\n'
               repl = needle + '\thdev->destruct = btusb_compat_destruct;\n\thdev->owner    = THIS_MODULE;\n'
               if needle not in s:
-                  raise SystemExit('HCI callback anchor not found')
+                  raise SystemExit('HCI callback patch anchor not found')
               s = s.replace(needle, repl, 1)
 
           s = s.replace('hci_get_drvdata(hdev)', 'hdev->driver_data')
           s = s.replace('hci_set_drvdata(hdev, data);', 'hdev->driver_data = data;')
           p.write_text(s)
+          PY
+          grep -n -A5 -B2 '0x17cb' kernel/drivers/bluetooth/btusb.c
+          grep -n -A8 -B4 'btusb_compat_destruct' kernel/drivers/bluetooth/btusb.c
+          grep -n 'driver_data' kernel/drivers/bluetooth/btusb.c | head -n 30
+          if grep -q 'hci_get_drvdata(hdev)' kernel/drivers/bluetooth/btusb.c; then
+            echo 'ERROR: unpatched hci_get_drvdata remains in btusb.c'
+            exit 1
+          fi
 
-          # ---- Accept modern BlueZ control channel 3 ----
+      - name: Add modern BlueZ management-channel compatibility
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
           p = Path('kernel/net/bluetooth/hci_sock.c')
           s = p.read_text()
           old = '''\tif (haddr.hci_channel > HCI_CHANNEL_CONTROL)\n\t\treturn -EINVAL;\n\n\tif (haddr.hci_channel == HCI_CHANNEL_CONTROL && !enable_mgmt)\n\t\treturn -EINVAL;\n'''
-          new = '''\t/* Modern BlueZ uses HCI_CHANNEL_CONTROL == 3. */\n\tif (haddr.hci_channel == 3)\n\t\thaddr.hci_channel = HCI_CHANNEL_CONTROL;\n\telse if (haddr.hci_channel > HCI_CHANNEL_CONTROL)\n\t\treturn -EINVAL;\n\n\tif (haddr.hci_channel == HCI_CHANNEL_CONTROL && !enable_mgmt)\n\t\treturn -EINVAL;\n'''
+          new = '''\t/* Accept modern BlueZ HCI_CHANNEL_CONTROL (3) and map it to\n\t * this legacy Android kernel's HCI_CHANNEL_CONTROL (1). */\n\tif (haddr.hci_channel == 3)\n\t\thaddr.hci_channel = HCI_CHANNEL_CONTROL;\n\telse if (haddr.hci_channel > HCI_CHANNEL_CONTROL)\n\t\treturn -EINVAL;\n\n\tif (haddr.hci_channel == HCI_CHANNEL_CONTROL && !enable_mgmt)\n\t\treturn -EINVAL;\n'''
           if old not in s:
-              raise SystemExit('HCI control-channel anchor not found')
+              raise SystemExit('HCI management-channel patch anchor not found')
           s = s.replace(old, new, 1)
           p.write_text(s)
+          PY
+          grep -n -A14 -B5 'modern BlueZ HCI_CHANNEL_CONTROL' kernel/net/bluetooth/hci_sock.c
 
-          # ---- Modern CMD_COMPLETE layout: opcode + status + params ----
+      - name: Add modern BlueZ MGMT command-complete event layout
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
           h = Path('kernel/include/net/bluetooth/mgmt.h')
           s = h.read_text()
           old = '''struct mgmt_ev_cmd_complete {\n\t__le16 opcode;\n\t__u8 data[0];\n} __packed;'''
           new = '''struct mgmt_ev_cmd_complete {\n\t__le16 opcode;\n\t__u8 status;\n\t__u8 data[0];\n} __packed;'''
           if old not in s:
-              raise SystemExit('MGMT cmd-complete struct anchor not found')
+              raise SystemExit('MGMT cmd-complete struct patch anchor not found')
           s = s.replace(old, new, 1)
           h.write_text(s)
 
@@ -84,89 +99,27 @@ jobs:
           old = '''\tev = (void *) skb_put(skb, sizeof(*ev) + rp_len);\n\tput_unaligned_le16(cmd, &ev->opcode);\n\n\tif (rp)\n\t\tmemcpy(ev->data, rp, rp_len);'''
           new = '''\tev = (void *) skb_put(skb, sizeof(*ev) + rp_len);\n\tput_unaligned_le16(cmd, &ev->opcode);\n\tev->status = 0; /* MGMT status success */\n\n\tif (rp)\n\t\tmemcpy(ev->data, rp, rp_len);'''
           if old not in s:
-              raise SystemExit('MGMT cmd-complete writer anchor not found')
+              raise SystemExit('MGMT cmd-complete writer patch anchor not found')
           s = s.replace(old, new, 1)
-
-          # ---- Minimal MGMT v1 bootstrap ----
-          # BlueZ 5.66 refuses MGMT v0.  Do not pretend that the whole old
-          # kernel is modern: only expose the v1 READ_INFO layout and basic
-          # settings needed to enumerate an already-UP BR/EDR controller.
-          s = s.replace('#define MGMT_VERSION\t0\n#define MGMT_REVISION\t1',
-                        '#define MGMT_VERSION\t1\n#define MGMT_REVISION\t0', 1)
-
-          start = s.find('static int read_controller_info(struct sock *sk, u16 index)')
-          end = s.find('static void mgmt_pending_free_worker', start)
-          if start < 0 or end < 0:
-              raise SystemExit('read_controller_info function anchors not found')
-
-          func = r'''static int read_controller_info(struct sock *sk, u16 index)
-{
-	/* Linux MGMT v1 READ_INFO wire layout expected by BlueZ 5.x. */
-	struct mgmt_rp_read_info_v1 {
-		bdaddr_t bdaddr;
-		__u8 version;
-		__le16 manufacturer;
-		__le32 supported_settings;
-		__le32 current_settings;
-		__u8 dev_class[3];
-		__u8 name[MGMT_MAX_NAME_LENGTH];
-		__u8 short_name[11];
-	} __packed rp;
-	struct hci_dev *hdev;
-	u32 supported, current;
-
-	BT_DBG("sock %p hci%u", sk, index);
-
-	hdev = hci_dev_get(index);
-	if (!hdev)
-		return cmd_status(sk, index, MGMT_OP_READ_INFO, 0x11);
-
-	hci_del_off_timer(hdev);
-	hci_dev_lock_bh(hdev);
-	set_bit(HCI_MGMT, &hdev->flags);
-
-	memset(&rp, 0, sizeof(rp));
-	bacpy(&rp.bdaddr, &hdev->bdaddr);
-	rp.version = hdev->hci_ver;
-	put_unaligned_le16(hdev->manufacturer, &rp.manufacturer);
-
-	/* Earliest MGMT-v1 settings only.  Deliberately do not advertise
-	 * SSP/LE/advertising here: their command opcodes differ from this
-	 * legacy Android MGMT implementation and will be translated later
-	 * only if BlueZ actually needs them. */
-	supported = 0x00000001 | /* POWERED */
-		    0x00000002 | /* CONNECTABLE */
-		    0x00000008 | /* DISCOVERABLE */
-		    0x00000010 | /* BONDABLE */
-		    0x00000080;  /* BREDR */
-	current = 0x00000010 | 0x00000080;
-	if (test_bit(HCI_UP, &hdev->flags))
-		current |= 0x00000001;
-	if (test_bit(HCI_PSCAN, &hdev->flags))
-		current |= 0x00000002;
-	if (test_bit(HCI_ISCAN, &hdev->flags))
-		current |= 0x00000008;
-
-	put_unaligned_le32(supported, &rp.supported_settings);
-	put_unaligned_le32(current, &rp.current_settings);
-	memcpy(rp.dev_class, hdev->dev_class, sizeof(rp.dev_class));
-	memcpy(rp.name, hdev->dev_name,
-	       min_t(size_t, sizeof(rp.name), sizeof(hdev->dev_name)));
-
-	hci_dev_unlock_bh(hdev);
-	hci_dev_put(hdev);
-
-	return cmd_complete(sk, index, MGMT_OP_READ_INFO, &rp, sizeof(rp));
-}
-
-'''
-          s = s[:start] + func + s[end:]
           p.write_text(s)
           PY
+          grep -n -A6 -B2 'struct mgmt_ev_cmd_complete' kernel/include/net/bluetooth/mgmt.h
+          grep -n -A18 -B4 'static int cmd_complete' kernel/net/bluetooth/mgmt.c
 
-          grep -n -A4 -B2 'MGMT_VERSION' kernel/net/bluetooth/mgmt.c | head -n 12
-          grep -n -A65 -B3 'static int read_controller_info' kernel/net/bluetooth/mgmt.c
-          grep -n -A5 -B2 'struct mgmt_ev_cmd_complete' kernel/include/net/bluetooth/mgmt.h
+      - name: Advertise MGMT 1.0 for BlueZ compatibility probe
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('kernel/net/bluetooth/mgmt.c')
+          s = p.read_text()
+          old = '#define MGMT_VERSION\t0\n#define MGMT_REVISION\t1'
+          new = '#define MGMT_VERSION\t1\n#define MGMT_REVISION\t0'
+          if old not in s:
+              raise SystemExit('MGMT version anchor not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+          grep -n -A2 -B2 'MGMT_VERSION' kernel/net/bluetooth/mgmt.c | head -n 10
 
       - name: Make legacy gcc-wrapper work with Python 3
         run: |
@@ -200,17 +153,17 @@ jobs:
       - name: Prepare artifacts
         run: |
           mkdir -p artifact
-          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-mgmtv1bootstrap
-          cp kernel/build/.config artifact/nethunter-flo-bt400-mgmtv1bootstrap.config
-          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-mgmtv1bootstrap
-          cp kernel/build/vmlinux artifact/vmlinux-nethunter-flo-bt400-mgmtv1bootstrap
+          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-mgmtv1probe
+          cp kernel/build/.config artifact/nethunter-flo-bt400-mgmtv1probe.config
+          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-mgmtv1probe
+          cp kernel/build/vmlinux artifact/vmlinux-nethunter-flo-bt400-mgmtv1probe
           sha256sum artifact/* | tee artifact/SHA256SUMS.txt
           ls -lh artifact
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nethunter-flo-bt400-mgmtv1bootstrap-kernel
+          name: nethunter-flo-bt400-mgmtv1probe-kernel
           path: artifact/
           if-no-files-found: error
           retention-days: 30
