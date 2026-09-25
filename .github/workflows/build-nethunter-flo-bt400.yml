@@ -39,8 +39,6 @@ jobs:
                   raise SystemExit('BT400 ID patch anchor not found')
               s = s.replace(needle, repl, 1)
 
-          # Old Qualcomm HCI core requires ->destruct. Keep it no-op because
-          # btusb_disconnect() already owns/free()s the btusb private data.
           if 'static void btusb_compat_destruct(struct hci_dev *hdev)' not in s:
               needle = 'static struct usb_driver btusb_driver;\n'
               repl = needle + '\n/* Compatibility shim for the older flo HCI core. */\nstatic void btusb_compat_destruct(struct hci_dev *hdev)\n{\n}\n'
@@ -55,13 +53,8 @@ jobs:
                   raise SystemExit('HCI callback patch anchor not found')
               s = s.replace(needle, repl, 1)
 
-          # Critical ABI fix: this flo tree has struct hci_dev::driver_data,
-          # but hci_get/set_drvdata() use hdev->dev drvdata. hci_register_sysfs()
-          # later overwrites that dev drvdata with hdev itself. Keep btusb
-          # private state in the legacy hdev->driver_data field instead.
           s = s.replace('hci_get_drvdata(hdev)', 'hdev->driver_data')
           s = s.replace('hci_set_drvdata(hdev, data);', 'hdev->driver_data = data;')
-
           p.write_text(s)
           PY
           grep -n -A5 -B2 '0x17cb' kernel/drivers/bluetooth/btusb.c
@@ -78,13 +71,6 @@ jobs:
           from pathlib import Path
           p = Path('kernel/net/bluetooth/hci_sock.c')
           s = p.read_text()
-
-          # This Android/Qualcomm 3.4 tree uses the old ABI:
-          #   RAW=0, CONTROL=1
-          # Modern BlueZ (including 5.66 in the NetHunter chroot) uses:
-          #   RAW=0, USER=1, MONITOR=2, CONTROL=3
-          # Translate modern CONTROL channel 3 to this kernel's legacy
-          # internal CONTROL channel 1, preserving compatibility with both.
           old = '''\tif (haddr.hci_channel > HCI_CHANNEL_CONTROL)\n\t\treturn -EINVAL;\n\n\tif (haddr.hci_channel == HCI_CHANNEL_CONTROL && !enable_mgmt)\n\t\treturn -EINVAL;\n'''
           new = '''\t/* Accept modern BlueZ HCI_CHANNEL_CONTROL (3) and map it to\n\t * this legacy Android kernel's HCI_CHANNEL_CONTROL (1). */\n\tif (haddr.hci_channel == 3)\n\t\thaddr.hci_channel = HCI_CHANNEL_CONTROL;\n\telse if (haddr.hci_channel > HCI_CHANNEL_CONTROL)\n\t\treturn -EINVAL;\n\n\tif (haddr.hci_channel == HCI_CHANNEL_CONTROL && !enable_mgmt)\n\t\treturn -EINVAL;\n'''
           if old not in s:
@@ -93,6 +79,39 @@ jobs:
           p.write_text(s)
           PY
           grep -n -A14 -B5 'modern BlueZ HCI_CHANNEL_CONTROL' kernel/net/bluetooth/hci_sock.c
+
+      - name: Add modern BlueZ MGMT command-complete event layout
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # The flo kernel implements MGMT v0. Its CMD_COMPLETE event is:
+          #   opcode(2) + return_params
+          # Modern BlueZ expects:
+          #   opcode(2) + status(1) + return_params
+          # Without the status byte BlueZ consumes MGMT_VERSION=0 as status,
+          # leaving a 2-byte READ_VERSION payload and reports
+          # "Wrong size of read version response".
+          h = Path('kernel/include/net/bluetooth/mgmt.h')
+          s = h.read_text()
+          old = '''struct mgmt_ev_cmd_complete {\n\t__le16 opcode;\n\t__u8 data[0];\n} __packed;'''
+          new = '''struct mgmt_ev_cmd_complete {\n\t__le16 opcode;\n\t__u8 status;\n\t__u8 data[0];\n} __packed;'''
+          if old not in s:
+              raise SystemExit('MGMT cmd-complete struct patch anchor not found')
+          s = s.replace(old, new, 1)
+          h.write_text(s)
+
+          p = Path('kernel/net/bluetooth/mgmt.c')
+          s = p.read_text()
+          old = '''\tev = (void *) skb_put(skb, sizeof(*ev) + rp_len);\n\tput_unaligned_le16(cmd, &ev->opcode);\n\n\tif (rp)\n\t\tmemcpy(ev->data, rp, rp_len);'''
+          new = '''\tev = (void *) skb_put(skb, sizeof(*ev) + rp_len);\n\tput_unaligned_le16(cmd, &ev->opcode);\n\tev->status = MGMT_STATUS_SUCCESS;\n\n\tif (rp)\n\t\tmemcpy(ev->data, rp, rp_len);'''
+          if old not in s:
+              raise SystemExit('MGMT cmd-complete writer patch anchor not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+          grep -n -A6 -B2 'struct mgmt_ev_cmd_complete' kernel/include/net/bluetooth/mgmt.h
+          grep -n -A18 -B4 'static int cmd_complete' kernel/net/bluetooth/mgmt.c
 
       - name: Make legacy gcc-wrapper work with Python 3
         run: |
@@ -126,17 +145,17 @@ jobs:
       - name: Prepare artifacts
         run: |
           mkdir -p artifact
-          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-mgmtcompat
-          cp kernel/build/.config artifact/nethunter-flo-bt400-mgmtcompat.config
-          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-mgmtcompat
-          cp kernel/build/vmlinux artifact/vmlinux-nethunter-flo-bt400-mgmtcompat
+          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-mgmteventcompat
+          cp kernel/build/.config artifact/nethunter-flo-bt400-mgmteventcompat.config
+          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-mgmteventcompat
+          cp kernel/build/vmlinux artifact/vmlinux-nethunter-flo-bt400-mgmteventcompat
           sha256sum artifact/* | tee artifact/SHA256SUMS.txt
           ls -lh artifact
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nethunter-flo-bt400-mgmtcompat-kernel
+          name: nethunter-flo-bt400-mgmteventcompat-kernel
           path: artifact/
           if-no-files-found: error
           retention-days: 30
