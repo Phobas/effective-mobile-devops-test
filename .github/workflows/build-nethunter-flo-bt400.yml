@@ -34,6 +34,259 @@ jobs:
           grep -n -A50 -B3 'static int read_controller_info' kernel/net/bluetooth/mgmt.c
           grep -n -A2 -B2 'MGMT_VERSION' kernel/net/bluetooth/mgmt.c | head -n 10
 
+      - name: Patch BlueZ 5.66 discovery bridge
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('kernel/net/bluetooth/mgmt.c')
+          s = p.read_text()
+
+          # Modern BlueZ 5.66 discovery ABI.  The flo kernel predates MGMT v1:
+          #   modern START/STOP = 0x0023/0x0024
+          #   legacy START/STOP = 0x001b/0x001c
+          # and modern DISCOVERING = 0x0013 with {type, discovering}.
+          anchor = 'LIST_HEAD(cmd_list);\n'
+          compat = r'''
+
+          #define COMPAT_MGMT_OP_START_DISCOVERY 0x0023
+          #define COMPAT_MGMT_OP_STOP_DISCOVERY  0x0024
+          #define COMPAT_MGMT_EV_DISCOVERING     0x0013
+          #define COMPAT_MGMT_EV_DEVICE_FOUND    0x0012
+
+          static __u8 compat_discovery_type = 0x01;
+          static __u8 compat_discovery_v1;
+
+          static int mgmt_event(u16 event, u16 index, void *data, u16 data_len,
+                                          struct sock *skip_sk);
+
+          struct compat_mgmt_ev_discovering {
+                  __u8 type;
+                  __u8 discovering;
+          } __packed;
+
+          static int compat_emit_discovering(u16 index, __u8 discovering)
+          {
+                  struct compat_mgmt_ev_discovering ev;
+
+                  ev.type = compat_discovery_type;
+                  ev.discovering = discovering;
+                  return mgmt_event(COMPAT_MGMT_EV_DISCOVERING, index,
+                                    &ev, sizeof(ev), NULL);
+          }
+          '''
+          if 'COMPAT_MGMT_OP_START_DISCOVERY' not in s:
+              if anchor not in s:
+                  raise SystemExit('compat global anchor not found')
+              s = s.replace(anchor, anchor + compat, 1)
+
+          # BlueZ expects the START_DISCOVERY command-complete payload to contain
+          # the one-byte discovery type.  Re-use the legacy HCI discovery engine,
+          # but translate its completion and Discovering event to MGMT v1.
+          old = '''\tif (cmd->opcode == MGMT_OP_START_DISCOVERY) {\n\t\tev.val = 1;\n\t\tcmd_status(cmd->sk, cmd->index, MGMT_OP_START_DISCOVERY, 0);\n\t} else {\n\t\tev.val = 0;\n\t\tcmd_complete(cmd->sk, cmd->index, MGMT_OP_STOP_DISCOVERY,\n\t\t\t\t\t\t\t\tNULL, 0);'''
+          new = '''\tif (cmd->opcode == MGMT_OP_START_DISCOVERY) {\n\t\tev.val = 1;\n\t\tif (compat_discovery_v1)\n\t\t\tcmd_complete(cmd->sk, cmd->index,\n\t\t\t\t\tCOMPAT_MGMT_OP_START_DISCOVERY,\n\t\t\t\t\t&compat_discovery_type,\n\t\t\t\t\tsizeof(compat_discovery_type));\n\t\telse\n\t\t\tcmd_status(cmd->sk, cmd->index, MGMT_OP_START_DISCOVERY, 0);\n\t} else {\n\t\tev.val = 0;\n\t\tif (compat_discovery_v1)\n\t\t\tcmd_complete(cmd->sk, cmd->index,\n\t\t\t\t\tCOMPAT_MGMT_OP_STOP_DISCOVERY,\n\t\t\t\t\t&compat_discovery_type,\n\t\t\t\t\tsizeof(compat_discovery_type));\n\t\telse\n\t\t\tcmd_complete(cmd->sk, cmd->index, MGMT_OP_STOP_DISCOVERY,\n\t\t\t\t\t\t\t\tNULL, 0);'''
+          if old not in s:
+              raise SystemExit('discovery_rsp response anchor not found')
+          s = s.replace(old, new, 1)
+
+          # Every legacy DISCOVERING event has opcode 0x0014 and a one-byte
+          # payload.  BlueZ 5.66 expects opcode 0x0013 and two bytes.
+          replacements = [
+              ('\tmgmt_event(MGMT_EV_DISCOVERING, cmd->index, &ev, sizeof(ev), NULL);',
+               '\tif (compat_discovery_v1)\\n\t\tcompat_emit_discovering(cmd->index, ev.val);\\n\telse\\n\t\tmgmt_event(MGMT_EV_DISCOVERING, cmd->index, &ev, sizeof(ev), NULL);'),
+              ('\t\tmgmt_event(MGMT_EV_DISCOVERING, index, &cp, sizeof(cp), NULL);',
+               '\t\tif (compat_discovery_v1)\\n\t\t\tcompat_emit_discovering(index, cp.val);\\n\t\telse\\n\t\t\tmgmt_event(MGMT_EV_DISCOVERING, index, &cp, sizeof(cp), NULL);'),
+              ('\tmgmt_event(MGMT_EV_DISCOVERING, index, &cp, sizeof(cp), NULL);',
+               '\tif (compat_discovery_v1)\\n\t\tcompat_emit_discovering(index, cp.val);\\n\telse\\n\t\tmgmt_event(MGMT_EV_DISCOVERING, index, &cp, sizeof(cp), NULL);'),
+              ('\tmgmt_event(MGMT_EV_DISCOVERING, hdev->id, &cp, sizeof(cp), NULL);',
+               '\tif (compat_discovery_v1)\\n\t\tcompat_emit_discovering(hdev->id, cp.val);\\n\telse\\n\t\tmgmt_event(MGMT_EV_DISCOVERING, hdev->id, &cp, sizeof(cp), NULL);'),
+          ]
+          for old_ev, new_ev in replacements:
+              if old_ev in s:
+                  s = s.replace(old_ev, new_ev)
+
+          # BlueZ currently advertises this controller as BR/EDR-only through
+          # READ_INFO.  Do not let the legacy engine silently switch to LE after
+          # a BR inquiry when the requested modern discovery type is BR/EDR only.
+          a = s.index('static int start_discovery(struct sock *sk, u16 index)')
+          b = s.index('static int stop_discovery(struct sock *sk, u16 index)', a)
+          frag = s[a:b]
+          frag = frag.replace('if (lmp_le_capable(hdev)) {',
+                              'if (lmp_le_capable(hdev) && (!compat_discovery_v1 ||\\n'
+                              '\t\t\t\t(compat_discovery_type & 0x06))) {')
+          s = s[:a] + frag + s[b:]
+
+          a = s.index('void mgmt_inquiry_complete_evt(u16 index, u8 status)')
+          b = s.index('void mgmt_disco_timeout(unsigned long data)', a)
+          frag = s[a:b]
+          old_cond = 'if (!hdev || !lmp_le_capable(hdev)) {'
+          new_cond = ('if (!hdev || !lmp_le_capable(hdev) ||\\n'
+                      '\t\t(compat_discovery_v1 && !(compat_discovery_type & 0x06))) {')
+          if old_cond not in frag:
+              raise SystemExit('inquiry complete condition anchor not found')
+          frag = frag.replace(old_cond, new_cond, 1)
+          s = s[:a] + frag + s[b:]
+
+          # Dispatch the modern 0x0023/0x0024 opcodes.  Those numeric values
+          # collide with two vendor-era legacy commands in this kernel.
+          wrapper_anchor = 'int mgmt_control(struct sock *sk, struct msghdr *msg, size_t msglen)\n'
+          wrappers = r'''
+          static int compat_start_discovery_v1(struct sock *sk, u16 index,
+                                  unsigned char *data, u16 len)
+          {
+                  if (len != 1)
+                          return cmd_status(sk, index,
+                                            COMPAT_MGMT_OP_START_DISCOVERY, 0x0d);
+
+                  compat_discovery_type = data[0];
+                  compat_discovery_v1 = 1;
+                  return start_discovery(sk, index);
+          }
+
+          static int compat_stop_discovery_v1(struct sock *sk, u16 index,
+                                  unsigned char *data, u16 len)
+          {
+                  if (len != 1)
+                          return cmd_status(sk, index,
+                                            COMPAT_MGMT_OP_STOP_DISCOVERY, 0x0d);
+
+                  compat_discovery_type = data[0];
+                  compat_discovery_v1 = 1;
+                  return stop_discovery(sk, index);
+          }
+
+          '''
+          if 'static int compat_start_discovery_v1(' not in s:
+              if wrapper_anchor not in s:
+                  raise SystemExit('mgmt_control anchor not found')
+              s = s.replace(wrapper_anchor, wrappers + wrapper_anchor, 1)
+
+          old = '''\tcase MGMT_OP_CANCEL_RESOLVE_NAME:\n\t\terr = cancel_resolve_name(sk, index, buf + sizeof(*hdr), len);\n\t\tbreak;'''
+          new = '''\tcase MGMT_OP_CANCEL_RESOLVE_NAME:\n\t\terr = compat_stop_discovery_v1(sk, index,\n\t\t\t\tbuf + sizeof(*hdr), len);\n\t\tbreak;'''
+          if old not in s:
+              raise SystemExit('modern stop dispatch collision anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''\tcase MGMT_OP_UNSET_RSSI_REPORTER:\n\t\terr = unset_rssi_reporter(sk, index, buf + sizeof(*hdr), len);\n\t\tbreak;'''
+          new = '''\tcase MGMT_OP_UNSET_RSSI_REPORTER:\n\t\terr = compat_start_discovery_v1(sk, index,\n\t\t\t\tbuf + sizeof(*hdr), len);\n\t\tbreak;'''
+          if old not in s:
+              raise SystemExit('modern start dispatch collision anchor not found')
+          s = s.replace(old, new, 1)
+
+          # The legacy handlers behind those colliding opcodes are no longer
+          # referenced by mgmt_control in the compatibility build.
+          s = s.replace('static int unset_rssi_reporter(struct sock *sk, u16 index,',
+                        'static int __attribute__((unused)) unset_rssi_reporter(struct sock *sk, u16 index,', 1)
+          s = s.replace('static int cancel_resolve_name(struct sock *sk, u16 index,',
+                        'static int __attribute__((unused)) cancel_resolve_name(struct sock *sk, u16 index,', 1)
+
+          # Modern MGMT Device Found keeps opcode 0x0012 but changed the wire
+          # structure completely.  Rebuild just this event in the v1 layout and
+          # keep the legacy scan phase bookkeeping below it.
+          a = s.index('int mgmt_device_found(u16 index, bdaddr_t *bdaddr, u8 type, u8 le,')
+          b = s.index('\n\nint mgmt_remote_name(', a)
+          modern_device_found = r'''int mgmt_device_found(u16 index, bdaddr_t *bdaddr, u8 type, u8 le,
+                                  u8 *dev_class, s8 rssi, u8 eir_len, u8 *eir)
+          {
+                  struct compat_addr_info {
+                          bdaddr_t bdaddr;
+                          __u8 type;
+                  } __packed;
+                  struct compat_device_found {
+                          struct compat_addr_info addr;
+                          __s8 rssi;
+                          __le32 flags;
+                          __le16 eir_len;
+                          __u8 eir[0];
+                  } __packed;
+                  __u8 event_buf[sizeof(struct compat_device_found) + HCI_MAX_EIR_LENGTH];
+                  struct compat_device_found *ev = (void *) event_buf;
+                  struct hci_dev *hdev;
+                  int err;
+
+                  BT_DBG("le: %d", le);
+                  (void) dev_class;
+
+                  if (eir_len > HCI_MAX_EIR_LENGTH)
+                          eir_len = HCI_MAX_EIR_LENGTH;
+
+                  memset(event_buf, 0, sizeof(event_buf));
+                  bacpy(&ev->addr.bdaddr, bdaddr);
+                  ev->addr.type = le ? (type ? 0x02 : 0x01) : 0x00;
+                  ev->rssi = rssi;
+                  put_unaligned_le32(0, &ev->flags);
+                  put_unaligned_le16(eir_len, &ev->eir_len);
+                  if (eir && eir_len)
+                          memcpy(ev->eir, eir, eir_len);
+
+                  if (compat_discovery_v1)
+                          err = mgmt_event(COMPAT_MGMT_EV_DEVICE_FOUND, index, ev,
+                                           sizeof(*ev) + eir_len, NULL);
+                  else
+                          err = 0;
+
+                  if (err < 0)
+                          return err;
+
+                  hdev = hci_dev_get(index);
+                  if (!hdev)
+                          return 0;
+
+                  if (hdev->disco_state == SCAN_IDLE)
+                          goto done;
+
+                  hdev->disco_int_count++;
+
+                  if (hdev->disco_int_count >= hdev->disco_int_phase) {
+                          struct hci_cp_inquiry cp = {{0x33, 0x8b, 0x9e}, 4, 0};
+                          struct hci_cp_le_set_scan_enable le_cp = {0, 0};
+
+                          hdev->disco_int_phase *= 2;
+                          hdev->disco_int_count = 0;
+                          if (hdev->disco_state == SCAN_LE) {
+                                  hci_send_cmd(hdev, HCI_OP_LE_SET_SCAN_ENABLE,
+                                               sizeof(le_cp), &le_cp);
+                                  cp.num_rsp = (u8) hdev->disco_int_phase;
+                                  hci_send_cmd(hdev, HCI_OP_INQUIRY,
+                                               sizeof(cp), &cp);
+                                  hdev->disco_state = SCAN_BR;
+                                  del_timer_sync(&hdev->disco_le_timer);
+                          }
+                  }
+
+          done:
+                  hci_dev_put(hdev);
+                  return 0;
+          }
+          '''
+          s = s[:a] + modern_device_found + s[b:]
+
+          # Legacy REMOTE_NAME uses event 0x0013, which now means DISCOVERING.
+          # Suppress it while the modern bridge is active rather than feeding a
+          # remote-name payload to BlueZ as a discovery-state event.
+          remote_anchor = '''int mgmt_remote_name(u16 index, bdaddr_t *bdaddr, u8 status, u8 *name)\n{\n\tstruct mgmt_ev_remote_name ev;'''
+          remote_new = '''int mgmt_remote_name(u16 index, bdaddr_t *bdaddr, u8 status, u8 *name)\n{\n\tstruct mgmt_ev_remote_name ev;\n\n\tif (compat_discovery_v1)\n\t\treturn 0;'''
+          if remote_anchor not in s:
+              raise SystemExit('remote-name event anchor not found')
+          s = s.replace(remote_anchor, remote_new, 1)
+
+          # Translate direct STOP completion/error paths to modern opcode/payload.
+          a = s.index('static int stop_discovery(struct sock *sk, u16 index)')
+          b = s.index('static int read_local_oob_data(', a)
+          frag = s[a:b]
+          old_complete = '''\t\t\terr = cmd_complete(sk, index, MGMT_OP_STOP_DISCOVERY,\n\t\t\t\t\t\t\t\tNULL, 0);'''
+          new_complete = '''\t\t\tif (compat_discovery_v1)\n\t\t\t\terr = cmd_complete(sk, index, COMPAT_MGMT_OP_STOP_DISCOVERY,\n\t\t\t\t\t\t&compat_discovery_type, sizeof(compat_discovery_type));\n\t\t\telse\n\t\t\t\terr = cmd_complete(sk, index, MGMT_OP_STOP_DISCOVERY,\n\t\t\t\t\t\t\t\tNULL, 0);'''
+          if old_complete in frag:
+              frag = frag.replace(old_complete, new_complete, 1)
+          s = s[:a] + frag + s[b:]
+
+          p.write_text(s)
+          PY
+
+          grep -n -E 'COMPAT_MGMT_OP_START_DISCOVERY|compat_start_discovery_v1|compat_emit_discovering|struct compat_device_found' kernel/net/bluetooth/mgmt.c
+          grep -n -A5 -B4 'case MGMT_OP_UNSET_RSSI_REPORTER' kernel/net/bluetooth/mgmt.c
+          grep -n -A5 -B4 'case MGMT_OP_CANCEL_RESOLVE_NAME' kernel/net/bluetooth/mgmt.c
+
       - name: Make legacy gcc-wrapper work with Python 3
         run: |
           python3 -m lib2to3 -w kernel/scripts/gcc-wrapper.py
@@ -66,17 +319,17 @@ jobs:
       - name: Prepare artifacts
         run: |
           mkdir -p artifact
-          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-mgmtv1info
-          cp kernel/build/.config artifact/nethunter-flo-bt400-mgmtv1info.config
-          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-mgmtv1info
-          cp kernel/build/vmlinux artifact/vmlinux-nethunter-flo-bt400-mgmtv1info
+          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-mgmtdiscovery
+          cp kernel/build/.config artifact/nethunter-flo-bt400-mgmtdiscovery.config
+          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-mgmtdiscovery
+          cp kernel/build/vmlinux artifact/vmlinux-nethunter-flo-bt400-mgmtdiscovery
           sha256sum artifact/* | tee artifact/SHA256SUMS.txt
           ls -lh artifact
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nethunter-flo-bt400-mgmtv1info-kernel
+          name: nethunter-flo-bt400-mgmtdiscovery-kernel
           path: artifact/
           if-no-files-found: error
           retention-days: 30
