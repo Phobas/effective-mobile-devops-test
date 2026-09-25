@@ -28,6 +28,8 @@ jobs:
       - name: Patch BT400 and BlueZ MGMT compatibility
         run: |
           python3 .github/scripts/patch_bt400_mgmt.py
+          sed -i -E 's/^static int (remove_key|disconnect|get_connections|pin_code_reply|pin_code_neg_reply)\(/static int __attribute__((unused)) \1(/' kernel/net/bluetooth/mgmt.c
+          grep -n -E '__attribute__\(\(unused\)\).*remove_key|__attribute__\(\(unused\)\).*disconnect|__attribute__\(\(unused\)\).*get_connections|__attribute__\(\(unused\)\).*pin_code' kernel/net/bluetooth/mgmt.c || true
           grep -n -A5 -B2 'struct mgmt_ev_cmd_status' kernel/include/net/bluetooth/mgmt.h
           grep -n -A50 -B3 'static int read_controller_info' kernel/net/bluetooth/mgmt.c
           grep -n -A2 -B2 'MGMT_VERSION' kernel/net/bluetooth/mgmt.c | head -n 10
