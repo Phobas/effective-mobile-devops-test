@@ -25,22 +25,44 @@ jobs:
         run: |
           git clone --depth 1 --branch cm-13.0 https://github.com/jcadduono/nethunter_kernel_flo.git kernel
 
-      - name: Patch btusb for ASUS USB-BT400 0b05:17cb
+      - name: Patch btusb for ASUS USB-BT400 0b05:17cb and flo HCI ABI
         run: |
           python3 - <<'PY'
           from pathlib import Path
           p = Path('kernel/drivers/bluetooth/btusb.c')
           s = p.read_text()
-          if 'USB_DEVICE(0x0b05, 0x17cb)' in s:
-              print('USB-BT400 ID already present')
-          else:
+
+          if 'USB_DEVICE(0x0b05, 0x17cb)' not in s:
               needle = '\t{ USB_DEVICE(0x0a5c, 0x21e1) },\n'
-              repl = needle + '\n\t/* ASUS USB-BT400 - Broadcom BCM20702A0.\n\t * Old flo Android USB core returns -EINVAL while btusb claims\n\t * the secondary SCO/isoc interface, so keep HCI command/ACL\n\t * transport and skip the optional isochronous interface. */\n\t{ USB_DEVICE(0x0b05, 0x17cb), .driver_info = BTUSB_BROKEN_ISOC },\n'
+              repl = needle + '\n\t/* ASUS USB-BT400 - Broadcom BCM20702A0. */\n\t{ USB_DEVICE(0x0b05, 0x17cb), .driver_info = BTUSB_BROKEN_ISOC },\n'
               if needle not in s:
-                  raise SystemExit('Patch anchor not found')
-              p.write_text(s.replace(needle, repl, 1))
+                  raise SystemExit('BT400 ID patch anchor not found')
+              s = s.replace(needle, repl, 1)
+
+          # This flo tree has an older Qualcomm HCI core that requires
+          # hdev->destruct, while its btusb.c is from the newer API and
+          # never assigns one. hci_register_dev() therefore returns -EINVAL.
+          # Current btusb_disconnect() already calls hci_free_dev(), so use
+          # a no-op compatibility destructor to satisfy the old HCI core
+          # without introducing a double-free.
+          if 'static void btusb_compat_destruct(struct hci_dev *hdev)' not in s:
+              needle = 'static struct usb_driver btusb_driver;\n'
+              repl = needle + '\n/* Compatibility shim for the older flo HCI core. */\nstatic void btusb_compat_destruct(struct hci_dev *hdev)\n{\n}\n'
+              if needle not in s:
+                  raise SystemExit('btusb_driver declaration anchor not found')
+              s = s.replace(needle, repl, 1)
+
+          if 'hdev->destruct = btusb_compat_destruct;' not in s:
+              needle = '\thdev->notify   = btusb_notify;\n'
+              repl = needle + '\thdev->destruct = btusb_compat_destruct;\n\thdev->owner    = THIS_MODULE;\n'
+              if needle not in s:
+                  raise SystemExit('HCI callback patch anchor not found')
+              s = s.replace(needle, repl, 1)
+
+          p.write_text(s)
           PY
-          grep -n -A8 -B2 '0x17cb' kernel/drivers/bluetooth/btusb.c
+          grep -n -A5 -B2 '0x17cb' kernel/drivers/bluetooth/btusb.c
+          grep -n -A8 -B4 'btusb_compat_destruct' kernel/drivers/bluetooth/btusb.c
 
       - name: Make legacy gcc-wrapper work with Python 3
         run: |
@@ -74,16 +96,16 @@ jobs:
       - name: Prepare artifacts
         run: |
           mkdir -p artifact
-          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-noisoc
-          cp kernel/build/.config artifact/nethunter-flo-bt400-noisoc.config
-          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-noisoc
+          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-hcifix
+          cp kernel/build/.config artifact/nethunter-flo-bt400-hcifix.config
+          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-hcifix
           sha256sum artifact/* | tee artifact/SHA256SUMS.txt
           ls -lh artifact
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nethunter-flo-bt400-noisoc-kernel
+          name: nethunter-flo-bt400-hcifix-kernel
           path: artifact/
           if-no-files-found: error
           retention-days: 30
