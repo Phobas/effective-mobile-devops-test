@@ -37,6 +37,11 @@ jobs:
           grep -n -E 'MGMT_OP_START_DISCOVERY|MGMT_OP_STOP_DISCOVERY|compat_discovery_type|compat_mgmt_discovering' kernel/net/bluetooth/mgmt.c | head -n 80
           grep -n -E 'MGMT_OP_START_DISCOVERY|MGMT_OP_STOP_DISCOVERY|MGMT_OP_UNSET_RSSI_REPORTER|MGMT_OP_CANCEL_RESOLVE_NAME' kernel/include/net/bluetooth/mgmt.h
 
+      - name: Patch BlueZ 5.66 BR/EDR pairing bridge
+        run: |
+          python3 .github/scripts/patch_bt400_pairing.py
+          grep -n -E 'MGMT_OP_PAIR_DEVICE|MGMT_OP_ADD_REMOTE_OOB_DATA|compat_pair_complete|addr_type' kernel/include/net/bluetooth/mgmt.h kernel/net/bluetooth/mgmt.c | head -n 120
+
       - name: Make legacy gcc-wrapper work with Python 3
         run: |
           python3 -m lib2to3 -w kernel/scripts/gcc-wrapper.py
@@ -69,17 +74,17 @@ jobs:
       - name: Prepare artifacts
         run: |
           mkdir -p artifact
-          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-mgmtdiscovery
-          cp kernel/build/.config artifact/nethunter-flo-bt400-mgmtdiscovery.config
-          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-mgmtdiscovery
-          cp kernel/build/vmlinux artifact/vmlinux-nethunter-flo-bt400-mgmtdiscovery
+          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-mgmtpair
+          cp kernel/build/.config artifact/nethunter-flo-bt400-mgmtpair.config
+          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-mgmtpair
+          cp kernel/build/vmlinux artifact/vmlinux-nethunter-flo-bt400-mgmtpair
           sha256sum artifact/* | tee artifact/SHA256SUMS.txt
           ls -lh artifact
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nethunter-flo-bt400-mgmtdiscovery-kernel
+          name: nethunter-flo-bt400-mgmtpair-kernel
           path: artifact/
           if-no-files-found: error
           retention-days: 30
