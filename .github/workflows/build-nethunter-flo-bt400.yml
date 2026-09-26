@@ -42,6 +42,11 @@ jobs:
           python3 .github/scripts/patch_bt400_pairing.py
           grep -n -E 'MGMT_OP_PAIR_DEVICE|MGMT_OP_ADD_REMOTE_OOB_DATA|compat_pair_complete|addr_type' kernel/include/net/bluetooth/mgmt.h kernel/net/bluetooth/mgmt.c | head -n 120
 
+      - name: Patch Link Key Request fallback
+        run: |
+          python3 .github/scripts/patch_bt400_linkkey.py
+          grep -n -A12 -B4 'HCI_LINK_KEYS' kernel/net/bluetooth/hci_event.c | head -n 80
+
       - name: Make legacy gcc-wrapper work with Python 3
         run: |
           python3 -m lib2to3 -w kernel/scripts/gcc-wrapper.py
@@ -74,17 +79,17 @@ jobs:
       - name: Prepare artifacts
         run: |
           mkdir -p artifact
-          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-mgmtpair
-          cp kernel/build/.config artifact/nethunter-flo-bt400-mgmtpair.config
-          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-mgmtpair
-          cp kernel/build/vmlinux artifact/vmlinux-nethunter-flo-bt400-mgmtpair
+          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-linkkeyfix
+          cp kernel/build/.config artifact/nethunter-flo-bt400-linkkeyfix.config
+          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-linkkeyfix
+          cp kernel/build/vmlinux artifact/vmlinux-nethunter-flo-bt400-linkkeyfix
           sha256sum artifact/* | tee artifact/SHA256SUMS.txt
           ls -lh artifact
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nethunter-flo-bt400-mgmtpair-kernel
+          name: nethunter-flo-bt400-linkkeyfix-kernel
           path: artifact/
           if-no-files-found: error
           retention-days: 30
