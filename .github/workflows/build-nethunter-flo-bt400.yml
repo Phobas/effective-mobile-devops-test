@@ -47,6 +47,14 @@ jobs:
           python3 .github/scripts/patch_bt400_linkkey.py
           grep -n -A12 -B4 'HCI_LINK_KEYS' kernel/net/bluetooth/hci_event.c | head -n 80
 
+      - name: Patch full BlueZ 5.66 MGMT v1 bridge
+        run: |
+          python3 .github/scripts/patch_bt400_mgmtv1_full.py
+          python3 .github/scripts/patch_bt400_mgmtv1_completions.py
+          grep -n -E 'MGMT_OP_(READ_COMMANDS|LOAD_KEYS|SET_IO_CAPABILITY|PAIR_DEVICE|USER_CONFIRM_REPLY|USER_PASSKEY_REPLY|START_DISCOVERY)' kernel/include/net/bluetooth/mgmt.h
+          grep -n -E 'MGMT_EV_(NEW_SETTINGS|NEW_KEY|CONNECTED|DISCONNECTED|USER_CONFIRM_REQUEST|USER_PASSKEY_REQUEST|AUTH_FAILED|DEVICE_FOUND)' kernel/include/net/bluetooth/mgmt.h
+          grep -n -E 'compat_(read_commands|hci_status|errno_status|user_passkey_reply|emit_new_settings)' kernel/net/bluetooth/mgmt.c | head -n 120
+
       - name: Make legacy gcc-wrapper work with Python 3
         run: |
           python3 -m lib2to3 -w kernel/scripts/gcc-wrapper.py
@@ -79,17 +87,17 @@ jobs:
       - name: Prepare artifacts
         run: |
           mkdir -p artifact
-          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-linkkeyfix
-          cp kernel/build/.config artifact/nethunter-flo-bt400-linkkeyfix.config
-          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-linkkeyfix
-          cp kernel/build/vmlinux artifact/vmlinux-nethunter-flo-bt400-linkkeyfix
+          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-mgmtv1full
+          cp kernel/build/.config artifact/nethunter-flo-bt400-mgmtv1full.config
+          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-mgmtv1full
+          cp kernel/build/vmlinux artifact/vmlinux-nethunter-flo-bt400-mgmtv1full
           sha256sum artifact/* | tee artifact/SHA256SUMS.txt
           ls -lh artifact
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nethunter-flo-bt400-linkkeyfix-kernel
+          name: nethunter-flo-bt400-mgmtv1full-kernel
           path: artifact/
           if-no-files-found: error
           retention-days: 30
