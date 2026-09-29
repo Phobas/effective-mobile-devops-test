@@ -18,6 +18,12 @@ new = '''for pat, repl in settings_events:
 
 if old not in s:
     raise SystemExit('settings-events strict-check anchor not found')
+s = s.replace(old, new, 1)
 
-p.write_text(s.replace(old, new, 1))
-print('Full MGMT patch prepared for optional legacy settings events')
+# This flo tree has mgmt_pin_code_request(index, bdaddr) with secure hardcoded
+# to zero, rather than the newer helper taking a secure argument.  Adjust the
+# full patcher's exact anchor to the code that is actually present here.
+s = s.replace('\\tev.secure = secure;', '\\tev.secure = 0;')
+
+p.write_text(s)
+print('Full MGMT patch prepared for flo vendor layout')
