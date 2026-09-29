@@ -49,6 +49,7 @@ jobs:
 
       - name: Patch full BlueZ 5.66 MGMT v1 bridge
         run: |
+          python3 .github/scripts/prepare_bt400_mgmtv1_full.py
           python3 .github/scripts/patch_bt400_mgmtv1_full.py
           python3 .github/scripts/patch_bt400_mgmtv1_completions.py
           grep -n -E 'MGMT_OP_(READ_COMMANDS|LOAD_KEYS|SET_IO_CAPABILITY|PAIR_DEVICE|USER_CONFIRM_REPLY|USER_PASSKEY_REPLY|START_DISCOVERY)' kernel/include/net/bluetooth/mgmt.h
