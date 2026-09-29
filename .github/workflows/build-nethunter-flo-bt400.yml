@@ -57,6 +57,13 @@ jobs:
           grep -n -E 'MGMT_EV_(NEW_SETTINGS|NEW_KEY|CONNECTED|DISCONNECTED|USER_CONFIRM_REQUEST|USER_PASSKEY_REQUEST|AUTH_FAILED|DEVICE_FOUND)' kernel/include/net/bluetooth/mgmt.h
           grep -n -E 'compat_(read_commands|hci_status|errno_status|user_passkey_reply|emit_new_settings)|COMPAT_HCI_OP_USER_PASSKEY' kernel/net/bluetooth/mgmt.c | head -n 140
 
+      - name: Harden MGMT v1 pairing semantics
+        run: |
+          python3 .github/scripts/patch_bt400_mgmtv1_hardening.py
+          grep -n -A75 'static u8 compat_hci_status' kernel/net/bluetooth/mgmt.c | head -n 85
+          grep -n -A28 'static void pairing_complete' kernel/net/bluetooth/mgmt.c | head -n 40
+          grep -n -A18 'static int compat_user_passkey_reply' kernel/net/bluetooth/mgmt.c | head -n 35
+
       - name: Make legacy gcc-wrapper work with Python 3
         run: |
           python3 -m lib2to3 -w kernel/scripts/gcc-wrapper.py
@@ -89,17 +96,17 @@ jobs:
       - name: Prepare artifacts
         run: |
           mkdir -p artifact
-          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-mgmtv1full
-          cp kernel/build/.config artifact/nethunter-flo-bt400-mgmtv1full.config
-          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-mgmtv1full
-          cp kernel/build/vmlinux artifact/vmlinux-nethunter-flo-bt400-mgmtv1full
+          cp kernel/build/arch/arm/boot/zImage artifact/zImage-nethunter-flo-bt400-mgmtv1hardened
+          cp kernel/build/.config artifact/nethunter-flo-bt400-mgmtv1hardened.config
+          cp kernel/build/System.map artifact/System.map-nethunter-flo-bt400-mgmtv1hardened
+          cp kernel/build/vmlinux artifact/vmlinux-nethunter-flo-bt400-mgmtv1hardened
           sha256sum artifact/* | tee artifact/SHA256SUMS.txt
           ls -lh artifact
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nethunter-flo-bt400-mgmtv1full-kernel
+          name: nethunter-flo-bt400-mgmtv1hardened-kernel
           path: artifact/
           if-no-files-found: error
           retention-days: 30
