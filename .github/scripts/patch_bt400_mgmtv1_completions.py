@@ -68,12 +68,17 @@ s = s[:start] + seg + s[end:]
 # mgmt_event(..., cmd->sk).  In this old kernel the final argument is skip_sk,
 # so that accidentally excluded the requester.  Command responses must be sent
 # directly to the MGMT socket that issued Pair Device.
-old = "\tmgmt_event(MGMT_EV_CMD_COMPLETE, cmd->index, &ev, sizeof(ev), cmd->sk);"
-new = ("\tcompat_cmd_complete_status(cmd->sk, cmd->index, MGMT_OP_PAIR_DEVICE, "
-       "mgmt_status, &ev.bdaddr, sizeof(ev.bdaddr) + sizeof(ev.addr_type));")
-if old not in s:
-    raise SystemExit("pairing_complete requester-socket anchor not found")
-s = s.replace(old, new, 1)
+pattern = re.compile(
+    r"\s*mgmt_event\(MGMT_EV_CMD_COMPLETE,\s*cmd->index,\s*&ev,\s*"
+    r"sizeof\(ev\),\s*cmd->sk\);"
+)
+replacement = (
+    "\n        compat_cmd_complete_status(cmd->sk, cmd->index, MGMT_OP_PAIR_DEVICE, "
+    "mgmt_status, &ev.bdaddr, sizeof(ev.bdaddr) + sizeof(ev.addr_type));"
+)
+s, n = pattern.subn(replacement, s, count=1)
+if n != 1:
+    raise SystemExit(f"pairing_complete requester-socket anchor count={n}")
 
 p.write_text(s)
 print("MGMT v1 PIN/SSP/pair completion responses patched")
