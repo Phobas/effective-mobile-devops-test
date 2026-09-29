@@ -52,9 +52,10 @@ jobs:
           python3 .github/scripts/prepare_bt400_mgmtv1_full.py
           python3 .github/scripts/patch_bt400_mgmtv1_full.py
           python3 .github/scripts/patch_bt400_mgmtv1_completions.py
+          python3 .github/scripts/patch_bt400_passkey_hci.py
           grep -n -E 'MGMT_OP_(READ_COMMANDS|LOAD_KEYS|SET_IO_CAPABILITY|PAIR_DEVICE|USER_CONFIRM_REPLY|USER_PASSKEY_REPLY|START_DISCOVERY)' kernel/include/net/bluetooth/mgmt.h
           grep -n -E 'MGMT_EV_(NEW_SETTINGS|NEW_KEY|CONNECTED|DISCONNECTED|USER_CONFIRM_REQUEST|USER_PASSKEY_REQUEST|AUTH_FAILED|DEVICE_FOUND)' kernel/include/net/bluetooth/mgmt.h
-          grep -n -E 'compat_(read_commands|hci_status|errno_status|user_passkey_reply|emit_new_settings)' kernel/net/bluetooth/mgmt.c | head -n 120
+          grep -n -E 'compat_(read_commands|hci_status|errno_status|user_passkey_reply|emit_new_settings)|COMPAT_HCI_OP_USER_PASSKEY' kernel/net/bluetooth/mgmt.c | head -n 140
 
       - name: Make legacy gcc-wrapper work with Python 3
         run: |
