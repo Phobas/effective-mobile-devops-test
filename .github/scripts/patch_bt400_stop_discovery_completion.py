@@ -33,7 +33,9 @@ s = s[:a] + seg + s[b:]
 # sent a second command-complete itself. Since the callback now owns completion,
 # remove that duplicate response while preserving the successful HCI result.
 a = s.index("static int stop_discovery(struct sock *sk, u16 index)")
-b = s.index("static int resolve_name(", a)
+b = s.find("\nstatic ", a + 1)
+if b < 0:
+    raise SystemExit("stop_discovery end marker not found")
 seg = s[a:b]
 
 needle = (
@@ -64,7 +66,9 @@ if "compat_mgmt_discovering(cmd->index, ev.val);" not in term:
     raise SystemExit("STOP_DISCOVERY discovering event invariant failed")
 
 a = s.index("static int stop_discovery(struct sock *sk, u16 index)")
-b = s.index("static int resolve_name(", a)
+b = s.find("\nstatic ", a + 1)
+if b < 0:
+    raise SystemExit("stop_discovery invariant end marker not found")
 stop = s[a:b]
 if "cmd_complete(sk, index, MGMT_OP_STOP_DISCOVERY" in stop:
     raise SystemExit("duplicate immediate STOP_DISCOVERY completion remains")
