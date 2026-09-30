@@ -64,6 +64,11 @@ jobs:
           grep -n -A28 'static void pairing_complete' kernel/net/bluetooth/mgmt.c | head -n 40
           grep -n -A18 'static int compat_user_passkey_reply' kernel/net/bluetooth/mgmt.c | head -n 35
 
+      - name: Fix MGMT REMOVE_UUID clear-all completion
+        run: |
+          python3 .github/scripts/patch_bt400_remove_uuid_completion.py
+          grep -n -A22 -B4 'hci_uuids_clear(hdev)' kernel/net/bluetooth/mgmt.c | head -n 40
+
       - name: Make legacy gcc-wrapper work with Python 3
         run: |
           python3 -m lib2to3 -w kernel/scripts/gcc-wrapper.py
