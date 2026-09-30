@@ -69,6 +69,12 @@ jobs:
           python3 .github/scripts/patch_bt400_remove_uuid_completion.py
           grep -n -A22 -B4 'hci_uuids_clear(hdev)' kernel/net/bluetooth/mgmt.c | head -n 40
 
+      - name: Fix MGMT STOP_DISCOVERY completion
+        run: |
+          python3 .github/scripts/patch_bt400_stop_discovery_completion.py
+          grep -n -A30 -B4 'static void discovery_terminated' kernel/net/bluetooth/mgmt.c | head -n 45
+          grep -n -A65 'static int stop_discovery' kernel/net/bluetooth/mgmt.c | head -n 75
+
       - name: Make legacy gcc-wrapper work with Python 3
         run: |
           python3 -m lib2to3 -w kernel/scripts/gcc-wrapper.py
