@@ -1,0 +1,189 @@
+name: Build Kali flo mainline proof2
+
+on:
+  push:
+    branches:
+      - kali-flo-mainline-proof2
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout helper repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git make gcc-arm-linux-gnueabihf gcc-arm-none-eabi \
+            libc6-dev-armhf-cross bc bison flex libssl-dev libelf-dev \
+            device-tree-compiler cpio gzip xz-utils python3 libfdt-dev
+
+      - name: Clone APQ8064 mainline Linux 7.1
+        run: |
+          git clone --depth 1 --branch qcom-apq8064-v7.1 \
+            https://github.com/apq8064-mainline/linux.git kernel
+          head -n 8 kernel/Makefile
+
+      - name: Configure flo diagnostic kernel
+        working-directory: kernel
+        run: |
+          export ARCH=arm
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          mkdir -p build
+          make O=build qcom_defconfig
+
+          scripts/config --file build/.config \
+            -e BLK_DEV_INITRD \
+            -e DEVTMPFS \
+            -e DEVTMPFS_MOUNT \
+            -e PROC_FS \
+            -e SYSFS \
+            -e TMPFS \
+            -e VT \
+            -e VT_CONSOLE \
+            -e FB \
+            -e FRAMEBUFFER_CONSOLE \
+            -e DRM \
+            -e DRM_MSM \
+            -e DRM_FBDEV_EMULATION \
+            -e DRM_SIMPLEDRM \
+            -e BACKLIGHT_CLASS_DEVICE \
+            -e DRM_PANEL_JDI_LT070ME05000 \
+            -e USB \
+            -e USB_OTG \
+            -e USB_GADGET \
+            -e USB_CHIPIDEA \
+            -e USB_CHIPIDEA_UDC \
+            -e USB_MSM_OTG \
+            -e USB_G_SERIAL \
+            -e USB_MON \
+            -e MMC \
+            -e MMC_BLOCK \
+            -e MMC_SDHCI \
+            -e MMC_SDHCI_MSM \
+            -e EXT4_FS \
+            -e IKCONFIG \
+            -e IKCONFIG_PROC \
+            -e PRINTK_TIME \
+            -e PSTORE \
+            -e PSTORE_RAM \
+            -e PSTORE_CONSOLE \
+            -e MAGIC_SYSRQ
+
+          make O=build olddefconfig
+          grep -E 'CONFIG_(DRM_MSM|DRM_PANEL_JDI_LT070ME05000|DRM_SIMPLEDRM|FRAMEBUFFER_CONSOLE|USB_G_SERIAL|USB_MSM_OTG|MMC_SDHCI_MSM|BLK_DEV_INITRD|PSTORE|PSTORE_RAM|PSTORE_CONSOLE)=' build/.config
+
+      - name: Build Linux kernel and flo DTB
+        working-directory: kernel
+        run: |
+          export ARCH=arm
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          make O=build -j2 zImage qcom/qcom-apq8064-asus-nexus7-flo.dtb
+          ls -lh build/arch/arm/boot/zImage \
+            build/arch/arm/boot/dts/qcom/qcom-apq8064-asus-nexus7-flo.dtb
+
+      - name: Build static proof init
+        run: |
+          arm-linux-gnueabihf-gcc -static -Os -s \
+            kali-flo-mainline/proof_init.c -o proof-init
+          file proof-init
+          arm-linux-gnueabihf-readelf -h proof-init | grep -E 'Class:|Machine:'
+
+      - name: Build minimal initramfs
+        run: |
+          rm -rf rootfs
+          mkdir -p rootfs/{dev,proc,sys,tmp}
+          install -m 0755 proof-init rootfs/init
+          (
+            cd rootfs
+            find . -print0 | cpio --null -ov --format=newc
+          ) | gzip -9 > initramfs-flo-proof2.cpio.gz
+          ls -lh initramfs-flo-proof2.cpio.gz
+
+      - name: Append flo DTB to zImage
+        run: |
+          cat kernel/build/arch/arm/boot/zImage \
+              kernel/build/arch/arm/boot/dts/qcom/qcom-apq8064-asus-nexus7-flo.dtb \
+              > zImage-flo-7.1-proof2-appended-dtb
+          ls -lh zImage-flo-7.1-proof2-appended-dtb
+
+      - name: Pack diagnostic Android-v0 boot image
+        run: |
+          python3 - <<'PY'
+          import struct
+          from pathlib import Path
+
+          PAGE = 2048
+          kernel = Path('zImage-flo-7.1-proof2-appended-dtb').read_bytes()
+          ramdisk = Path('initramfs-flo-proof2.cpio.gz').read_bytes()
+          cmd = (b'console=tty0 console=ttyMSM0,115200n8 loglevel=8 ignore_loglevel '
+                 b'rdinit=/init panic=10 lk2nd.pass-ramoops=zap '
+                 b'lk2nd.pass-simplefb=xrgb8888,relocate')
+          assert len(cmd) < 512
+
+          def field(data, size):
+              if len(data) > size:
+                  raise ValueError('field too large')
+              return data + b'\0' * (size - len(data))
+
+          header = b''.join([
+              b'ANDROID!',
+              struct.pack('<10I',
+                  len(kernel), 0x80208000,
+                  len(ramdisk), 0x82200000,
+                  0, 0x81100000,
+                  0x80200100,
+                  PAGE,
+                  0, 0),
+              field(b'', 16),
+              field(cmd, 512),
+              b'\0' * 32,
+              field(b'', 1024),
+          ])
+          assert len(header) == 1632
+
+          def pad(data):
+              return data + b'\0' * ((-len(data)) % PAGE)
+
+          out = pad(header) + pad(kernel) + pad(ramdisk)
+          Path('boot-kali-flo-mainline-proof2.img').write_bytes(out)
+          print('boot image bytes:', len(out))
+          print('kernel bytes:', len(kernel), 'ramdisk bytes:', len(ramdisk))
+          PY
+          file boot-kali-flo-mainline-proof2.img
+
+      - name: Build temporary lk2nd msm8960 fastboot image
+        run: |
+          git clone --depth 1 https://github.com/msm8916-mainline/lk2nd.git lk2nd
+          make -C lk2nd -j2 \
+            TOOLCHAIN_PREFIX=arm-none-eabi- \
+            LK2ND_FORCE_FASTBOOT=1 \
+            lk2nd-msm8960
+          cp lk2nd/build-lk2nd-msm8960/lk2nd.img lk2nd-msm8960-flo-fastboot.img
+          file lk2nd-msm8960-flo-fastboot.img
+          ls -lh lk2nd-msm8960-flo-fastboot.img
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifact
+          cp boot-kali-flo-mainline-proof2.img artifact/
+          cp lk2nd-msm8960-flo-fastboot.img artifact/
+          cp zImage-flo-7.1-proof2-appended-dtb artifact/
+          cp initramfs-flo-proof2.cpio.gz artifact/
+          cp kernel/build/arch/arm/boot/dts/qcom/qcom-apq8064-asus-nexus7-flo.dtb artifact/
+          cp kernel/build/.config artifact/kernel-7.1-flo-proof2.config
+          sha256sum artifact/* | tee artifact/SHA256SUMS.txt
+          ls -lh artifact
+
+      - name: Upload proof artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kali-flo-mainline-proof2
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
