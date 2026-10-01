@@ -1,0 +1,203 @@
+name: Build Kali flo v5.10 earlydebug
+
+on:
+  push:
+    branches:
+      - kali-flo-v510-earlydebug
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout helper repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git make gcc-arm-linux-gnueabihf \
+            libc6-dev-armhf-cross bc bison flex libssl-dev libelf-dev \
+            device-tree-compiler cpio gzip xz-utils python3 libfdt-dev
+
+      - name: Clone APQ8064 mainline Linux 5.10
+        run: |
+          git clone --depth 1 --branch qcom-apq8064-v5.10 \
+            https://github.com/apq8064-mainline/linux.git kernel
+          head -n 8 kernel/Makefile
+
+      - name: Add ultra-early ramoops markers
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('kernel/arch/arm/boot/compressed/misc.c')
+          s = p.read_text()
+          needle = 'void decompress_kernel(unsigned long output_start, unsigned long free_mem_ptr_p,\n'
+          if needle not in s:
+              raise SystemExit('decompress_kernel signature not found')
+          # Marker area is the last 0x100 bytes of flo ramoops (0xbff80000..0xbfffffff).
+          # The decompressor runs with physical addressing, so direct stores are intentional.
+          marker_decl = '''\n#define FLO_EARLY_MARKER_BASE 0xbfffff00UL\nstatic inline void flo_early_marker(unsigned int slot, unsigned int value)\n{\n    volatile unsigned int *p = (volatile unsigned int *)FLO_EARLY_MARKER_BASE;\n    p[slot] = value;\n}\n\n'''
+          s = s.replace(needle, marker_decl + needle, 1)
+          brace_needle = 'void decompress_kernel(unsigned long output_start, unsigned long free_mem_ptr_p,\n\t\t       unsigned long free_mem_ptr_end_p,\n\t\t       int arch_id)\n{\n'
+          if brace_needle not in s:
+              raise SystemExit('decompress_kernel body not found')
+          s = s.replace(brace_needle, brace_needle + '\tflo_early_marker(0, 0x30444356); /* VCD0: entered decompressor */\n', 1)
+          # Put a second marker immediately after successful decompression.
+          decomp_call = '\t__decompress(input_data, input_data_end - input_data, NULL, NULL,\n\t\t     output_data, 0, NULL, error);\n'
+          if decomp_call not in s:
+              raise SystemExit('__decompress call not found')
+          s = s.replace(decomp_call, decomp_call + '\tflo_early_marker(1, 0x31444356); /* VCD1: decompression completed */\n', 1)
+          p.write_text(s)
+          print('Patched', p)
+          PY
+          grep -n -A8 -B4 'FLO_EARLY_MARKER_BASE\|VCD0\|VCD1' kernel/arch/arm/boot/compressed/misc.c
+
+      - name: Configure flo diagnostic kernel
+        working-directory: kernel
+        run: |
+          export ARCH=arm
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          mkdir -p build
+          make O=build qcom_defconfig
+
+          scripts/config --file build/.config \
+            -e BLK_DEV_INITRD \
+            -e DEVTMPFS \
+            -e DEVTMPFS_MOUNT \
+            -e PROC_FS \
+            -e SYSFS \
+            -e TMPFS \
+            -e VT \
+            -e VT_CONSOLE \
+            -e FB \
+            -e FRAMEBUFFER_CONSOLE \
+            -e DRM \
+            -e DRM_MSM \
+            -e DRM_FBDEV_EMULATION \
+            -e BACKLIGHT_CLASS_DEVICE \
+            -e DRM_PANEL_JDI_LT070ME05000 \
+            -e USB \
+            -e USB_OTG \
+            -e USB_GADGET \
+            -e USB_CHIPIDEA \
+            -e USB_CHIPIDEA_UDC \
+            -e USB_MSM_OTG \
+            -e USB_G_SERIAL \
+            -e USB_MON \
+            -e MMC \
+            -e MMC_BLOCK \
+            -e MMC_SDHCI \
+            -e MMC_SDHCI_MSM \
+            -e EXT4_FS \
+            -e IKCONFIG \
+            -e IKCONFIG_PROC \
+            -e PRINTK_TIME \
+            -e PSTORE \
+            -e PSTORE_RAM \
+            -e PSTORE_CONSOLE \
+            -d ATA \
+            -d SATA_AHCI \
+            -d SATA_AHCI_PLATFORM \
+            -d PHY_QCOM_APQ8064_SATA \
+            -d PHY_QCOM_IPQ806X_SATA
+
+          make O=build olddefconfig
+
+      - name: Build Linux kernel and flo DTB
+        working-directory: kernel
+        run: |
+          export ARCH=arm
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          make O=build -j2 zImage qcom/qcom-apq8064-asus-nexus7-flo.dtb
+          ls -lh build/arch/arm/boot/zImage \
+            build/arch/arm/boot/dts/qcom/qcom-apq8064-asus-nexus7-flo.dtb
+
+      - name: Build static proof init
+        run: |
+          arm-linux-gnueabihf-gcc -static -Os -s \
+            kali-flo-mainline/proof_init.c -o proof-init
+
+      - name: Build minimal initramfs
+        run: |
+          rm -rf rootfs
+          mkdir -p rootfs/{dev,proc,sys,tmp}
+          install -m 0755 proof-init rootfs/init
+          (
+            cd rootfs
+            find . -print0 | cpio --null -ov --format=newc
+          ) | gzip -9 > initramfs-flo-v510-earlydebug.cpio.gz
+
+      - name: Append flo DTB to zImage
+        run: |
+          cat kernel/build/arch/arm/boot/zImage \
+              kernel/build/arch/arm/boot/dts/qcom/qcom-apq8064-asus-nexus7-flo.dtb \
+              > zImage-flo-v510-earlydebug-appended-dtb
+
+      - name: Pack Android-v0 earlydebug boot image
+        run: |
+          python3 - <<'PY'
+          import struct
+          from pathlib import Path
+
+          PAGE = 2048
+          kernel = Path('zImage-flo-v510-earlydebug-appended-dtb').read_bytes()
+          ramdisk = Path('initramfs-flo-v510-earlydebug.cpio.gz').read_bytes()
+          cmd = (
+              b'console=ttyMSM0,115200,n8 console=tty0 '
+              b'user_debug=31 msm_rtb.filter=0x3F ehci-hcd.park=3 vmalloc=340M '
+              b'fw_devlink=permissive loglevel=8 ignore_loglevel rdinit=/init '
+              b'panic=0 lk2nd.pass-ramoops=zap'
+          )
+          assert len(cmd) < 512
+
+          def field(data, size):
+              if len(data) > size:
+                  raise ValueError('field too large')
+              return data + b'\0' * (size - len(data))
+
+          header = b''.join([
+              b'ANDROID!',
+              struct.pack('<10I',
+                  len(kernel), 0x80208000,
+                  len(ramdisk), 0x82200000,
+                  0, 0x81100000,
+                  0x80200100,
+                  PAGE,
+                  0, 0),
+              field(b'', 16),
+              field(cmd, 512),
+              b'\0' * 32,
+              field(b'', 1024),
+          ])
+          assert len(header) == 1632
+
+          def pad(data):
+              return data + b'\0' * ((-len(data)) % PAGE)
+
+          out = pad(header) + pad(kernel) + pad(ramdisk)
+          Path('boot-kali-flo-v510-earlydebug.img').write_bytes(out)
+          print('boot image bytes:', len(out))
+          PY
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifact
+          cp boot-kali-flo-v510-earlydebug.img artifact/
+          cp zImage-flo-v510-earlydebug-appended-dtb artifact/
+          cp initramfs-flo-v510-earlydebug.cpio.gz artifact/
+          cp kernel/build/arch/arm/boot/dts/qcom/qcom-apq8064-asus-nexus7-flo.dtb artifact/
+          cp kernel/build/.config artifact/kernel-v510-flo-earlydebug.config
+          sha256sum artifact/* | tee artifact/SHA256SUMS.txt
+          ls -lh artifact
+
+      - name: Upload proof artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kali-flo-v510-earlydebug
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
