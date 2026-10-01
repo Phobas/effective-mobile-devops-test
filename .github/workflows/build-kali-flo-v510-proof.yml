@@ -71,10 +71,16 @@ jobs:
             -e PRINTK_TIME \
             -e PSTORE \
             -e PSTORE_RAM \
-            -e PSTORE_CONSOLE
+            -e PSTORE_CONSOLE \
+            -d ATA \
+            -d SATA_AHCI \
+            -d SATA_AHCI_PLATFORM \
+            -d PHY_QCOM_APQ8064_SATA \
+            -d PHY_QCOM_IPQ806X_SATA
 
           make O=build olddefconfig
-          grep -E 'CONFIG_(DRM_MSM|DRM_PANEL_JDI_LT070ME05000|FRAMEBUFFER_CONSOLE|USB_G_SERIAL|USB_MSM_OTG|MMC_SDHCI_MSM|BLK_DEV_INITRD|PSTORE|PSTORE_RAM|PSTORE_CONSOLE)=' build/.config
+          grep -E 'CONFIG_(DRM_MSM|DRM_PANEL_JDI_LT070ME05000|FRAMEBUFFER_CONSOLE|USB_G_SERIAL|MMC_SDHCI_MSM|BLK_DEV_INITRD|PSTORE|PSTORE_RAM|PSTORE_CONSOLE)=' build/.config
+          grep -E '^CONFIG_ATA=|^CONFIG_SATA_AHCI=' build/.config && exit 1 || true
 
       - name: Build Linux kernel and flo DTB
         working-directory: kernel
