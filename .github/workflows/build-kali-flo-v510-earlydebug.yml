@@ -33,28 +33,47 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+
           p = Path('kernel/arch/arm/boot/compressed/misc.c')
           s = p.read_text()
-          needle = 'void decompress_kernel(unsigned long output_start, unsigned long free_mem_ptr_p,\n'
-          if needle not in s:
+
+          # Linux 5.10 in apq8064-mainline uses:
+          #   void\n
+          #   decompress_kernel(...)
+          # and do_decompress(), not __decompress().
+          marker_decl = '''
+          #define FLO_EARLY_MARKER_BASE 0xbfffff00UL
+          static inline void flo_early_marker(unsigned int slot, unsigned int value)
+          {
+              volatile unsigned int *p = (volatile unsigned int *)FLO_EARLY_MARKER_BASE;
+              p[slot] = value;
+          }
+
+          '''
+
+          sig = 'void\ndecompress_kernel(unsigned long output_start, unsigned long free_mem_ptr_p,\n'
+          if sig not in s:
               raise SystemExit('decompress_kernel signature not found')
-          # Marker area is the last 0x100 bytes of flo ramoops (0xbff80000..0xbfffffff).
-          # The decompressor runs with physical addressing, so direct stores are intentional.
-          marker_decl = '''\n#define FLO_EARLY_MARKER_BASE 0xbfffff00UL\nstatic inline void flo_early_marker(unsigned int slot, unsigned int value)\n{\n    volatile unsigned int *p = (volatile unsigned int *)FLO_EARLY_MARKER_BASE;\n    p[slot] = value;\n}\n\n'''
-          s = s.replace(needle, marker_decl + needle, 1)
-          brace_needle = 'void decompress_kernel(unsigned long output_start, unsigned long free_mem_ptr_p,\n\t\t       unsigned long free_mem_ptr_end_p,\n\t\t       int arch_id)\n{\n'
-          if brace_needle not in s:
+          s = s.replace(sig, marker_decl + sig, 1)
+
+          body = ('void\ndecompress_kernel(unsigned long output_start, unsigned long free_mem_ptr_p,\n'
+                  '\t\tunsigned long free_mem_ptr_end_p,\n'
+                  '\t\tint arch_id)\n'
+                  '{\n')
+          if body not in s:
               raise SystemExit('decompress_kernel body not found')
-          s = s.replace(brace_needle, brace_needle + '\tflo_early_marker(0, 0x30444356); /* VCD0: entered decompressor */\n', 1)
-          # Put a second marker immediately after successful decompression.
-          decomp_call = '\t__decompress(input_data, input_data_end - input_data, NULL, NULL,\n\t\t     output_data, 0, NULL, error);\n'
-          if decomp_call not in s:
-              raise SystemExit('__decompress call not found')
-          s = s.replace(decomp_call, decomp_call + '\tflo_early_marker(1, 0x31444356); /* VCD1: decompression completed */\n', 1)
+          s = s.replace(body, body + '\tflo_early_marker(0, 0x30444356); /* VCD0 */\n', 1)
+
+          decomp = ('\tret = do_decompress(input_data, input_data_end - input_data,\n'
+                    '\t\t\t    output_data, error);\n')
+          if decomp not in s:
+              raise SystemExit('do_decompress call not found')
+          s = s.replace(decomp, decomp + '\tflo_early_marker(1, 0x31444356); /* VCD1 */\n', 1)
+
           p.write_text(s)
           print('Patched', p)
           PY
-          grep -n -A8 -B4 'FLO_EARLY_MARKER_BASE\|VCD0\|VCD1' kernel/arch/arm/boot/compressed/misc.c
+          grep -n -A10 -B5 'FLO_EARLY_MARKER_BASE\|VCD0\|VCD1' kernel/arch/arm/boot/compressed/misc.c
 
       - name: Configure flo diagnostic kernel
         working-directory: kernel
