@@ -19,7 +19,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            git make gcc-arm-linux-gnueabihf gcc-arm-none-eabi \
+            git make gcc-arm-linux-gnueabihf \
             libc6-dev-armhf-cross bc bison flex libssl-dev libelf-dev \
             device-tree-compiler cpio gzip xz-utils python3 libfdt-dev
 
